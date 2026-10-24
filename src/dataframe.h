@@ -1,6 +1,10 @@
+#pragma once
+
+#include <memory>
+#include <optional>
 #include <string>
 #include <vector>
-#include <predicate.h>
+#include "predicate.h"
 
 enum class AggregateFn {
     Count,
@@ -41,6 +45,19 @@ public:
     DataFrame aggregate(const std::string& column, AggregateFn function) const;
     DataFrame limit(std::size_t count) const;
     DataFrame execute() const;
+
+    using Column = std::vector<std::optional<std::string>>;
+
+    const std::vector<std::string>& column_names() const { return data_->names; }
+    const Column& column(std::size_t index) const { return data_->columns.at(index); }
+    std::size_t row_count() const { return data_->rows; }
 private:
-    // Dataframe internals TBD
+    struct Storage {
+        std::vector<std::string> names;
+        std::vector<Column> columns;
+        std::size_t rows = 0;
+    };
+
+    std::shared_ptr<const Storage> data_ = std::make_shared<const Storage>();
+    friend DataFrame read_csv(const std::string& file);
 };

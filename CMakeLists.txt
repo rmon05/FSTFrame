@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_library(fstframe src/read_csv.cpp)
+add_library(fstframe src/dataframe.cpp src/read_csv.cpp)
 target_include_directories(fstframe PUBLIC src)
 
 include(CTest)
@@ -26,4 +26,8 @@ if(BUILD_TESTING)
 
     include(GoogleTest)
     gtest_discover_tests(read_csv_test)
+
+    add_executable(dataframe_test tests/dataframe_test.cpp)
+    target_link_libraries(dataframe_test PRIVATE fstframe GTest::gtest_main)
+    gtest_discover_tests(dataframe_test)
 endif()

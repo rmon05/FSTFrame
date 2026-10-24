@@ -57,12 +57,22 @@ public:
     const Column& column(std::size_t index) const { return data_->columns.at(index); }
     std::size_t row_count() const { return data_->rows; }
 private:
+    struct SelectQuery {
+        std::vector<std::string> columns;
+    };
+
+    using Query = std::variant<SelectQuery>;
+
     struct Storage {
         std::vector<std::string> names;
         std::vector<Column> columns;
         std::size_t rows = 0;
     };
 
+    static std::shared_ptr<const Storage> execute_select(
+        const Storage& storage, const SelectQuery& query);
+
     std::shared_ptr<const Storage> data_ = std::make_shared<const Storage>();
+    std::vector<Query> queries_;
     friend DataFrame read_csv(const std::string& file);
 };

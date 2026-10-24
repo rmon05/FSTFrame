@@ -4,7 +4,6 @@
 #include <string>
 
 /*
-Reads a CSV file into the internal dataframe structure.
-TODO: add integers and float
+Reads CSV columns and infers integer, float, or string types; empty fields are nulls.
 */
 DataFrame read_csv(const std::string& file);

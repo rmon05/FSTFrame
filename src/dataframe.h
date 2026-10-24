@@ -1,9 +1,11 @@
 #pragma once
 
 #include <memory>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
+#include <variant>
 #include "predicate.h"
 
 enum class AggregateFn {
@@ -46,7 +48,10 @@ public:
     DataFrame limit(std::size_t count) const;
     DataFrame execute() const;
 
-    using Column = std::vector<std::optional<std::string>>;
+    using StringColumn = std::vector<std::optional<std::string>>;
+    using IntColumn = std::vector<std::optional<std::int64_t>>;
+    using FloatColumn = std::vector<std::optional<double>>;
+    using Column = std::variant<StringColumn, IntColumn, FloatColumn>;
 
     const std::vector<std::string>& column_names() const { return data_->names; }
     const Column& column(std::size_t index) const { return data_->columns.at(index); }

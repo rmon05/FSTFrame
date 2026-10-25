@@ -46,6 +46,7 @@ public:
     DataFrame select(const std::vector<std::string>& columns) const;
     // An empty output_name defaults to <function>_<column>, e.g. avg_points.
     // Count returns the number of non-null values as int64.
+    // Min/Max preserve the input type and return null for empty/all-null input.
     DataFrame aggregate(const std::string& column, AggregateFn function,
                         const std::string& output_name = "") const;
     DataFrame limit(std::size_t count) const;
@@ -99,6 +100,7 @@ private:
     std::shared_ptr<const Storage> execute_query(const LimitQuery& query) const;
     std::shared_ptr<const Storage> execute_query(const AggregateQuery& query) const;
     std::shared_ptr<Storage> create_storage(const std::vector<std::string>& columns) const;
+    std::string get_default_name(const std::string& column, AggregateFn function) const;
     void validate_predicate(const Predicate& predicate) const;
     std::size_t get_column_index(const std::string& column) const;
     void reset_selected_columns();

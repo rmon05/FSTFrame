@@ -85,6 +85,34 @@ bool is_valid_comparison_operator(CompareOp op) {
     return false;
 }
 
+template <typename Cell>
+DataFrame::Column aggregate_count(const std::vector<std::optional<Cell>>& column) {
+    const auto count = std::count_if(column.begin(), column.end(), [](const auto& cell) {
+        return cell.has_value();
+    });
+    return DataFrame::IntColumn{static_cast<std::int64_t>(count)};
+}
+
+template <typename Cell>
+DataFrame::Column aggregate_min(const std::vector<std::optional<Cell>>& column) {
+    std::optional<Cell> minimum; // Null if no non-null values exist.
+    for (const auto& cell : column) {
+        if (!cell) continue;
+        if (!minimum || compare_values(*cell, *minimum) < 0) minimum = cell;
+    }
+    return std::vector<std::optional<Cell>>{minimum};
+}
+
+template <typename Cell>
+DataFrame::Column aggregate_max(const std::vector<std::optional<Cell>>& column) {
+    std::optional<Cell> maximum; // Null if no non-null values exist.
+    for (const auto& cell : column) {
+        if (!cell) continue;
+        if (!maximum || compare_values(*cell, *maximum) > 0) maximum = cell;
+    }
+    return std::vector<std::optional<Cell>>{maximum};
+}
+
 } // namespace
 
 DataFrame DataFrame::filter(const Predicate& predicate) const {
@@ -113,15 +141,29 @@ DataFrame DataFrame::select(const std::vector<std::string>& columns) const {
 
 DataFrame DataFrame::aggregate(const std::string& column, AggregateFn function,
                                const std::string& output_name) const {
-    get_column_index(column);
-    if (function != AggregateFn::Count) {
-        throw std::invalid_argument("Only Count aggregation is implemented");
+    const auto index = get_column_index(column);
+    if (function != AggregateFn::Count && function != AggregateFn::Min && function != AggregateFn::Max) {
+        throw std::invalid_argument("Only Count, Min, and Max aggregation are implemented");
     }
-    const std::string name = output_name.empty() ? "count_" + column : output_name;
+    const std::string aggregate_column_name = output_name.empty()
+        ? get_default_name(column, function) : output_name;
+    auto result_info = selected_column_info_[index];
+    result_info.name = aggregate_column_name;
+    result_info.storage_index = std::nullopt;
+    if (function == AggregateFn::Count) result_info.type = ColumnInfo::Type::Int64;
     DataFrame result = *this;
-    result.selected_column_info_ = {{name, ColumnInfo::Type::Int64, std::nullopt}};
-    result.queries_.push_back(AggregateQuery{column, function, name});
+    result.selected_column_info_ = {result_info};
+    result.queries_.push_back(AggregateQuery{column, function, aggregate_column_name});
     return result;
+}
+
+std::string DataFrame::get_default_name(const std::string& column, AggregateFn function) const {
+    switch (function) {
+        case AggregateFn::Count: return "count_" + column;
+        case AggregateFn::Min: return "min_" + column;
+        case AggregateFn::Max: return "max_" + column;
+        default: throw std::invalid_argument("Only Count, Min, and Max aggregation are implemented");
+    }
 }
 
 DataFrame DataFrame::limit(std::size_t count) const {
@@ -221,16 +263,19 @@ std::shared_ptr<DataFrame::Storage> DataFrame::create_storage(
 
 std::shared_ptr<const DataFrame::Storage> DataFrame::execute_query(const AggregateQuery& query) const {
     const auto index = get_column_index(query.column);
-    const auto count = std::visit([](const auto& column) {
-        return std::count_if(column.begin(), column.end(), [](const auto& cell) {
-            return cell.has_value();
-        });
-    }, data_->columns[index]);
-
     auto output = std::make_shared<Storage>();
     output->names = {query.output_name};
     output->rows = 1;
-    output->columns.push_back(IntColumn{static_cast<std::int64_t>(count)});
+    auto aggregate_column = std::visit([&](const auto& column) -> Column {
+        switch (query.function) {
+            case AggregateFn::Count: return aggregate_count(column);
+            case AggregateFn::Min: return aggregate_min(column);
+            case AggregateFn::Max: return aggregate_max(column);
+            default:
+                throw std::invalid_argument("Only Count, Min, and Max aggregation are implemented");
+        }
+    }, data_->columns[index]);
+    output->columns.push_back(std::move(aggregate_column));
     return output;
 }
 

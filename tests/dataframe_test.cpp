@@ -465,9 +465,9 @@ TEST_F(CountTest, RejectsUnavailableColumnsAndUnsupportedFunctionsImmediately) {
     EXPECT_THROW(frame.aggregate("missing", AggregateFn::Count), std::invalid_argument);
     EXPECT_THROW(frame.select({"id"}).aggregate("score", AggregateFn::Count), std::invalid_argument);
     EXPECT_THROW(frame.select({}).aggregate("id", AggregateFn::Count), std::invalid_argument);
-    for (const auto function : {AggregateFn::Sum, AggregateFn::Min, AggregateFn::Max,
-                                AggregateFn::Avg, static_cast<AggregateFn>(999)}) {
+    for (const auto function : {AggregateFn::Sum, AggregateFn::Avg, static_cast<AggregateFn>(999)}) {
         EXPECT_THROW(frame.aggregate("id", function), std::invalid_argument);
+        EXPECT_THROW(frame.aggregate("id", function, "custom"), std::invalid_argument);
     }
 }
 
@@ -511,5 +511,97 @@ TEST_F(CountTest, BranchesAndArgumentCopiesStayIndependent) {
     EXPECT_EQ(second.execute().column_names(), (std::vector<std::string>{"other"}));
     EXPECT_EQ(std::get<DataFrame::IntColumn>(second.execute().column(0)), (DataFrame::IntColumn{1}));
 }
+
+class MinMaxTest : public FilterTest,
+                   public testing::WithParamInterface<AggregateFn> {};
+
+TEST_P(MinMaxTest, FindsExtremesForEachTypeAndSkipsNulls) {
+    const auto input = parse("id,name,score\n-3,Zoe,2.5\n4,Alice,-1.25\n0,Bob,\n-3,Zoe,2.5\n");
+    const bool is_min = GetParam() == AggregateFn::Min;
+    const std::string prefix = is_min ? "min_" : "max_";
+    const auto integers = input.aggregate("id", GetParam()).execute();
+    EXPECT_EQ(integers.column_names(), (std::vector<std::string>{prefix + "id"}));
+    EXPECT_EQ(integers.row_count(), 1);
+    EXPECT_EQ(std::get<DataFrame::IntColumn>(integers.column(0)), (DataFrame::IntColumn{is_min ? -3 : 4}));
+    const auto strings = input.aggregate("name", GetParam()).execute();
+    EXPECT_EQ(strings.column_names(), (std::vector<std::string>{prefix + "name"}));
+    EXPECT_EQ(std::get<DataFrame::StringColumn>(strings.column(0)),
+              (DataFrame::StringColumn{is_min ? "Alice" : "Zoe"}));
+    const auto floats = input.aggregate("score", GetParam()).execute();
+    EXPECT_EQ(floats.column_names(), (std::vector<std::string>{prefix + "score"}));
+    EXPECT_EQ(std::get<DataFrame::FloatColumn>(floats.column(0)), (DataFrame::FloatColumn{is_min ? -1.25 : 2.5}));
+}
+
+TEST_P(MinMaxTest, EmptyResultsContainOneTypedNull) {
+    const auto empty = frame.limit(0);
+    const auto integers = empty.aggregate("id", GetParam()).execute();
+    EXPECT_EQ(integers.row_count(), 1);
+    EXPECT_EQ(std::get<DataFrame::IntColumn>(integers.column(0)), (DataFrame::IntColumn{std::nullopt}));
+    const auto strings = empty.aggregate("name", GetParam()).execute();
+    EXPECT_EQ(std::get<DataFrame::StringColumn>(strings.column(0)), (DataFrame::StringColumn{std::nullopt}));
+    const auto floats = empty.aggregate("score", GetParam()).execute();
+    EXPECT_EQ(std::get<DataFrame::FloatColumn>(floats.column(0)), (DataFrame::FloatColumn{std::nullopt}));
+
+    const auto null_float = frame.filter({"id", CompareOp::Equal, std::int64_t{2}})
+        .aggregate("score", GetParam()).execute();
+    EXPECT_EQ(std::get<DataFrame::FloatColumn>(null_float.column(0)), (DataFrame::FloatColumn{std::nullopt}));
+    const auto null_string = parse("value\n\n\n").aggregate("value", GetParam()).execute();
+    EXPECT_EQ(std::get<DataFrame::StringColumn>(null_string.column(0)), (DataFrame::StringColumn{std::nullopt}));
+}
+
+TEST_P(MinMaxTest, CustomNamesAndPendingTypesSupportFurtherQueries) {
+    const auto strings = frame.aggregate("name", GetParam(), "extreme");
+    EXPECT_EQ(strings.column_names(), (std::vector<std::string>{"extreme"}));
+    EXPECT_THROW(strings.column(0), std::logic_error);
+    EXPECT_THROW(strings.filter({"extreme", CompareOp::Equal, 1.0}), std::invalid_argument);
+    const auto expected_name = GetParam() == AggregateFn::Min ? "Alice" : "Bob";
+    EXPECT_EQ(strings.select({"extreme"})
+                  .filter({"extreme", CompareOp::Equal, std::string{expected_name}}).execute().row_count(), 1);
+    const auto floats = frame.aggregate("score", GetParam(), "name");
+    EXPECT_THROW(floats.filter({"name", CompareOp::Equal, std::string{"Alice"}}), std::invalid_argument);
+    EXPECT_EQ(floats.filter({"name", CompareOp::Greater, std::int64_t{1}}).execute().row_count(), 1);
+    EXPECT_THROW(strings.select({"name"}), std::invalid_argument);
+}
+
+TEST_P(MinMaxTest, PreservesQueryOrderAndSupportsRepeatedAggregation) {
+    const auto limited = frame.limit(1).select({"id"}).aggregate("id", GetParam(), "value").execute();
+    EXPECT_EQ(std::get<DataFrame::IntColumn>(limited.column(0)), (DataFrame::IntColumn{1}));
+    const auto filtered = frame.filter({"id", CompareOp::Equal, std::int64_t{2}})
+        .aggregate("id", GetParam(), "value").limit(1).execute();
+    EXPECT_EQ(std::get<DataFrame::IntColumn>(filtered.column(0)), (DataFrame::IntColumn{2}));
+    const auto pending = frame.aggregate("score", GetParam(), "value");
+    const auto repeated = pending.aggregate("value", GetParam(), "again").execute();
+    EXPECT_EQ(std::get<DataFrame::FloatColumn>(repeated.column(0)), (DataFrame::FloatColumn{1.5}));
+    const auto null_count = frame.limit(0).aggregate("id", GetParam(), "value")
+        .aggregate("value", AggregateFn::Count).execute();
+    EXPECT_EQ(std::get<DataFrame::IntColumn>(null_count.column(0)), (DataFrame::IntColumn{0}));
+}
+
+TEST_P(MinMaxTest, PreservesInt64BoundaryValuesWithoutRounding) {
+    const auto input = parse("value\n9223372036854775807\n-9223372036854775808\n9007199254740993\n");
+    const auto result = input.aggregate("value", GetParam()).execute();
+    const auto expected = GetParam() == AggregateFn::Min
+        ? std::numeric_limits<std::int64_t>::min() : std::numeric_limits<std::int64_t>::max();
+    EXPECT_EQ(std::get<DataFrame::IntColumn>(result.column(0)), (DataFrame::IntColumn{expected}));
+}
+
+TEST_P(MinMaxTest, KeepsOriginalAndPendingPlansUnchanged) {
+    const auto* original_column = &frame.column(0);
+    const auto pending = frame.aggregate("id", GetParam(), "extreme");
+    const auto first = pending.execute();
+    const auto second = pending.execute();
+    EXPECT_EQ(first.column(0), second.column(0));
+    EXPECT_NE(&first.column(0), &second.column(0));
+    EXPECT_EQ(&first.execute().column(0), &first.column(0));
+    EXPECT_EQ(&frame.column(0), original_column);
+    EXPECT_EQ(frame.row_count(), 2);
+    EXPECT_THROW(pending.column(0), std::logic_error);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Extremes, MinMaxTest, testing::Values(AggregateFn::Min, AggregateFn::Max),
+    [](const testing::TestParamInfo<AggregateFn>& info) {
+        return info.param == AggregateFn::Min ? "Min" : "Max";
+    });
 
 } // namespace

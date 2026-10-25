@@ -1,6 +1,12 @@
+#pragma once
+
+#include <memory>
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
-#include <predicate.h>
+#include <variant>
+#include "predicate.h"
 
 enum class AggregateFn {
     Count,
@@ -36,11 +42,72 @@ return a one-row, one-column DataFrame.
 class DataFrame {
 public:
     // PUBLIC INTERFACE (DO NOT CHANGE SIGNATURE)
-    DataFrame filter(Predicate predicate) const;
-    DataFrame select(std::vector<std::string> columns) const;
-    DataFrame aggregate(const std::string& column, AggregateFn function) const;
+    DataFrame filter(const Predicate& predicate) const;
+    DataFrame select(const std::vector<std::string>& columns) const;
+    // An empty output_name defaults to <function>_<column>, e.g. avg_points.
+    // Count returns the number of non-null values as int64.
+    // Min/Max preserve the input type and return null for empty/all-null input.
+    // Sum/Avg require numeric input. Sum preserves its type (empty -> 0); Avg returns double (empty -> null).
+    DataFrame aggregate(const std::string& column, AggregateFn function,
+                        const std::string& output_name = "") const;
     DataFrame limit(std::size_t count) const;
     DataFrame execute() const;
+
+    using StringColumn = std::vector<std::optional<std::string>>;
+    using IntColumn = std::vector<std::optional<std::int64_t>>;
+    using FloatColumn = std::vector<std::optional<double>>;
+    using Column = std::variant<StringColumn, IntColumn, FloatColumn>;
+
+    std::vector<std::string> column_names() const;
+    const Column& column(std::size_t index) const;
+    std::size_t row_count() const { return data_->rows; }
 private:
-    // Dataframe internals TBD
+    struct SelectQuery {
+        std::vector<std::string> columns;
+    };
+
+    struct FilterQuery {
+        Predicate predicate;
+    };
+
+    struct LimitQuery {
+        std::size_t count;
+    };
+
+    struct AggregateQuery {
+        std::string column;
+        AggregateFn function;
+        std::string output_name;
+    };
+
+    using Query = std::variant<SelectQuery, FilterQuery, LimitQuery, AggregateQuery>;
+
+    struct ColumnInfo {
+        enum class Type { String, Int64, Float64 };
+        std::string name;
+        Type type;
+        // Generated aggregate values have no backing column until execution.
+        std::optional<std::size_t> storage_index;
+    };
+
+    struct Storage {
+        std::vector<std::string> names;
+        std::vector<Column> columns;
+        std::size_t rows = 0;
+    };
+
+    std::shared_ptr<const Storage> execute_query(const SelectQuery& query) const;
+    std::shared_ptr<const Storage> execute_query(const FilterQuery& query) const;
+    std::shared_ptr<const Storage> execute_query(const LimitQuery& query) const;
+    std::shared_ptr<const Storage> execute_query(const AggregateQuery& query) const;
+    std::shared_ptr<Storage> create_storage(const std::vector<std::string>& columns) const;
+    std::string get_default_name(const std::string& column, AggregateFn function) const;
+    void validate_predicate(const Predicate& predicate) const;
+    std::size_t get_column_index(const std::string& column) const;
+    void reset_selected_columns();
+
+    std::shared_ptr<const Storage> data_ = std::make_shared<const Storage>();
+    std::vector<ColumnInfo> selected_column_info_;
+    std::vector<Query> queries_;
+    friend DataFrame read_csv(const std::string& file);
 };

@@ -113,6 +113,51 @@ DataFrame::Column aggregate_max(const std::vector<std::optional<Cell>>& column) 
     return std::vector<std::optional<Cell>>{maximum};
 }
 
+template <typename Cell>
+DataFrame::Column aggregate_sum(const std::vector<std::optional<Cell>>& column) {
+    if constexpr (std::is_same_v<Cell, std::string>) {
+        throw std::invalid_argument("Sum requires a numeric column");
+    } else {
+        Cell sum = 0;
+        for (const auto& cell : column) {
+            if (!cell) continue;
+            if constexpr (std::is_same_v<Cell, std::int64_t>) {
+                const bool exceeds_max = *cell > 0 && sum > std::numeric_limits<Cell>::max() - *cell;
+                const bool below_min = *cell < 0 && sum < std::numeric_limits<Cell>::min() - *cell;
+                if (exceeds_max || below_min) throw std::overflow_error("Integer Sum overflow");
+            }
+            sum += *cell;
+            if constexpr (std::is_same_v<Cell, double>) {
+                if (!std::isfinite(sum)) throw std::overflow_error("Floating Sum overflow");
+            }
+        }
+        return std::vector<std::optional<Cell>>{sum};
+    }
+}
+
+template <typename Cell>
+DataFrame::Column aggregate_average(const std::vector<std::optional<Cell>>& column) {
+    if constexpr (std::is_same_v<Cell, std::string>) {
+        throw std::invalid_argument("Avg requires a numeric column");
+    } else {
+        std::optional<double> average;
+        std::size_t count = 0;
+        for (const auto& cell : column) {
+            if (!cell) continue;
+            const double value = static_cast<double>(*cell);
+            ++count;
+            if (!average) {
+                average = value;
+            } else {
+                // Update the mean without constructing a potentially overflowing sum.
+                const double weight = 1.0 / static_cast<double>(count);
+                average = std::lerp(*average, value, weight);
+            }
+        }
+        return DataFrame::FloatColumn{average};
+    }
+}
+
 } // namespace
 
 DataFrame DataFrame::filter(const Predicate& predicate) const {
@@ -142,8 +187,20 @@ DataFrame DataFrame::select(const std::vector<std::string>& columns) const {
 DataFrame DataFrame::aggregate(const std::string& column, AggregateFn function,
                                const std::string& output_name) const {
     const auto index = get_column_index(column);
-    if (function != AggregateFn::Count && function != AggregateFn::Min && function != AggregateFn::Max) {
-        throw std::invalid_argument("Only Count, Min, and Max aggregation are implemented");
+    switch (function) {
+        case AggregateFn::Count:
+        case AggregateFn::Sum:
+        case AggregateFn::Min:
+        case AggregateFn::Max:
+        case AggregateFn::Avg:
+            break;
+        default:
+            throw std::invalid_argument("Unknown aggregate function");
+    }
+    const bool requires_numeric_column = function == AggregateFn::Sum || function == AggregateFn::Avg;
+    const bool column_is_string = selected_column_info_[index].type == ColumnInfo::Type::String;
+    if (requires_numeric_column && column_is_string) {
+        throw std::invalid_argument("Sum and Avg require a numeric column");
     }
     const std::string aggregate_column_name = output_name.empty()
         ? get_default_name(column, function) : output_name;
@@ -151,6 +208,7 @@ DataFrame DataFrame::aggregate(const std::string& column, AggregateFn function,
     result_info.name = aggregate_column_name;
     result_info.storage_index = std::nullopt;
     if (function == AggregateFn::Count) result_info.type = ColumnInfo::Type::Int64;
+    if (function == AggregateFn::Avg) result_info.type = ColumnInfo::Type::Float64;
     DataFrame result = *this;
     result.selected_column_info_ = {result_info};
     result.queries_.push_back(AggregateQuery{column, function, aggregate_column_name});
@@ -162,7 +220,9 @@ std::string DataFrame::get_default_name(const std::string& column, AggregateFn f
         case AggregateFn::Count: return "count_" + column;
         case AggregateFn::Min: return "min_" + column;
         case AggregateFn::Max: return "max_" + column;
-        default: throw std::invalid_argument("Only Count, Min, and Max aggregation are implemented");
+        case AggregateFn::Sum: return "sum_" + column;
+        case AggregateFn::Avg: return "avg_" + column;
+        default: throw std::invalid_argument("Unknown aggregate function");
     }
 }
 
@@ -271,8 +331,10 @@ std::shared_ptr<const DataFrame::Storage> DataFrame::execute_query(const Aggrega
             case AggregateFn::Count: return aggregate_count(column);
             case AggregateFn::Min: return aggregate_min(column);
             case AggregateFn::Max: return aggregate_max(column);
+            case AggregateFn::Sum: return aggregate_sum(column);
+            case AggregateFn::Avg: return aggregate_average(column);
             default:
-                throw std::invalid_argument("Only Count, Min, and Max aggregation are implemented");
+                throw std::invalid_argument("Unknown aggregate function");
         }
     }, data_->columns[index]);
     output->columns.push_back(std::move(aggregate_column));

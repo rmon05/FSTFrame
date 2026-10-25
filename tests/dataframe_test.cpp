@@ -461,11 +461,11 @@ TEST_F(CountTest, EmptyAndAllNullColumnsProduceOneRowContainingZero) {
     EXPECT_EQ(std::get<DataFrame::IntColumn>(header_only.column(0)), (DataFrame::IntColumn{0}));
 }
 
-TEST_F(CountTest, RejectsUnavailableColumnsAndUnsupportedFunctionsImmediately) {
+TEST_F(CountTest, RejectsUnavailableColumnsAndInvalidFunctionsImmediately) {
     EXPECT_THROW(frame.aggregate("missing", AggregateFn::Count), std::invalid_argument);
     EXPECT_THROW(frame.select({"id"}).aggregate("score", AggregateFn::Count), std::invalid_argument);
     EXPECT_THROW(frame.select({}).aggregate("id", AggregateFn::Count), std::invalid_argument);
-    for (const auto function : {AggregateFn::Sum, AggregateFn::Avg, static_cast<AggregateFn>(999)}) {
+    for (const auto function : {static_cast<AggregateFn>(999)}) {
         EXPECT_THROW(frame.aggregate("id", function), std::invalid_argument);
         EXPECT_THROW(frame.aggregate("id", function, "custom"), std::invalid_argument);
     }
@@ -603,5 +603,121 @@ INSTANTIATE_TEST_SUITE_P(
     [](const testing::TestParamInfo<AggregateFn>& info) {
         return info.param == AggregateFn::Min ? "Min" : "Max";
     });
+
+class NumericAggregateTest : public FilterTest,
+                             public testing::WithParamInterface<AggregateFn> {};
+
+TEST_P(NumericAggregateTest, SkipsNullsAndUsesCorrectOutputTypes) {
+    const auto input = parse("integer,float\n10,1.5\n,2.25\n-3,\n0,-0.75\n");
+    const auto integers = input.aggregate("integer", GetParam()).execute();
+    const auto floats = input.aggregate("float", GetParam()).execute();
+    EXPECT_EQ(integers.row_count(), 1);
+    EXPECT_EQ(floats.row_count(), 1);
+    if (GetParam() == AggregateFn::Sum) {
+        EXPECT_EQ(integers.column_names(), (std::vector<std::string>{"sum_integer"}));
+        EXPECT_EQ(std::get<DataFrame::IntColumn>(integers.column(0)), (DataFrame::IntColumn{7}));
+        EXPECT_EQ(std::get<DataFrame::FloatColumn>(floats.column(0)), (DataFrame::FloatColumn{3.0}));
+    } else {
+        EXPECT_EQ(integers.column_names(), (std::vector<std::string>{"avg_integer"}));
+        EXPECT_NEAR(std::get<DataFrame::FloatColumn>(integers.column(0))[0].value(), 7.0 / 3.0, 1e-12);
+        EXPECT_NEAR(std::get<DataFrame::FloatColumn>(floats.column(0))[0].value(), 1.0, 1e-12);
+    }
+}
+
+TEST_P(NumericAggregateTest, RejectsStringsImmediatelyIncludingPendingStringResults) {
+    EXPECT_THROW(frame.aggregate("name", GetParam()), std::invalid_argument);
+    EXPECT_THROW(frame.aggregate("name", GetParam(), "custom"), std::invalid_argument);
+    EXPECT_THROW(frame.aggregate("name", AggregateFn::Min, "value")
+                     .aggregate("value", GetParam()), std::invalid_argument);
+    EXPECT_THROW(frame.select({"name"}).aggregate("id", GetParam()), std::invalid_argument);
+    const auto count_then_numeric = frame.aggregate("name", AggregateFn::Count, "value")
+        .aggregate("value", GetParam()).execute();
+    EXPECT_EQ(count_then_numeric.row_count(), 1);
+}
+
+TEST_P(NumericAggregateTest, HandlesEmptyAndAllNullNumericInput) {
+    const auto empty = frame.limit(0);
+    const auto integers = empty.aggregate("id", GetParam()).execute();
+    const auto floats = empty.aggregate("score", GetParam()).execute();
+    const auto nulls = frame.filter({"id", CompareOp::Equal, std::int64_t{2}})
+        .aggregate("score", GetParam()).execute();
+    EXPECT_EQ(integers.row_count(), 1);
+    EXPECT_EQ(nulls.row_count(), 1);
+    if (GetParam() == AggregateFn::Sum) {
+        EXPECT_EQ(std::get<DataFrame::IntColumn>(integers.column(0)), (DataFrame::IntColumn{0}));
+        EXPECT_EQ(std::get<DataFrame::FloatColumn>(floats.column(0)), (DataFrame::FloatColumn{0.0}));
+        EXPECT_EQ(std::get<DataFrame::FloatColumn>(nulls.column(0)), (DataFrame::FloatColumn{0.0}));
+    } else {
+        EXPECT_EQ(std::get<DataFrame::FloatColumn>(integers.column(0)), (DataFrame::FloatColumn{std::nullopt}));
+        EXPECT_EQ(std::get<DataFrame::FloatColumn>(floats.column(0)), (DataFrame::FloatColumn{std::nullopt}));
+        EXPECT_EQ(std::get<DataFrame::FloatColumn>(nulls.column(0)), (DataFrame::FloatColumn{std::nullopt}));
+    }
+}
+
+TEST_P(NumericAggregateTest, CustomNamesAndChainingPreserveIndependentPlans) {
+    const auto pending = frame.aggregate("id", GetParam(), "name");
+    EXPECT_EQ(pending.column_names(), (std::vector<std::string>{"name"}));
+    EXPECT_THROW(pending.column(0), std::logic_error);
+    EXPECT_THROW(pending.filter({"name", CompareOp::Equal, std::string{"Alice"}}), std::invalid_argument);
+    EXPECT_EQ(pending.select({"name"}).filter({"name", CompareOp::Greater, 1.0}).execute().row_count(), 1);
+    EXPECT_EQ(pending.limit(0).execute().row_count(), 0);
+    const auto first = pending.execute();
+    const auto second = pending.execute();
+    EXPECT_EQ(first.column(0), second.column(0));
+    EXPECT_NE(&first.column(0), &second.column(0));
+    EXPECT_EQ(&first.execute().column(0), &first.column(0));
+    EXPECT_EQ(frame.row_count(), 2);
+    EXPECT_EQ(frame.column_names(), (std::vector<std::string>{"id", "name", "score"}));
+
+    const auto limited = frame.select({"score", "id"}).limit(1)
+        .aggregate("id", GetParam(), "value").aggregate("value", AggregateFn::Avg).execute();
+    EXPECT_EQ(std::get<DataFrame::FloatColumn>(limited.column(0)), (DataFrame::FloatColumn{1.0}));
+    const auto repeated = pending.aggregate("name", GetParam(), "again").execute();
+    EXPECT_EQ(repeated.column(0), first.column(0));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    NumericFunctions, NumericAggregateTest, testing::Values(AggregateFn::Sum, AggregateFn::Avg),
+    [](const testing::TestParamInfo<AggregateFn>& info) {
+        return info.param == AggregateFn::Sum ? "Sum" : "Avg";
+    });
+
+TEST_F(FilterTest, IntegerSumPreservesExactValuesAndChecksOverflow) {
+    const auto exact = parse("value\n9007199254740993\n2\n").aggregate("value", AggregateFn::Sum).execute();
+    EXPECT_EQ(std::get<DataFrame::IntColumn>(exact.column(0)), (DataFrame::IntColumn{9007199254740995}));
+    const auto mixed = parse("value\n9223372036854775807\n-9223372036854775808\n2\n")
+        .aggregate("value", AggregateFn::Sum).execute();
+    EXPECT_EQ(std::get<DataFrame::IntColumn>(mixed.column(0)), (DataFrame::IntColumn{1}));
+    const auto positive_overflow = parse("value\n9223372036854775807\n1\n").aggregate("value", AggregateFn::Sum);
+    EXPECT_THROW(positive_overflow.execute(), std::overflow_error);
+    const auto negative_overflow = parse("value\n-9223372036854775808\n-1\n").aggregate("value", AggregateFn::Sum);
+    EXPECT_THROW(negative_overflow.execute(), std::overflow_error);
+    EXPECT_EQ(frame.row_count(), 2);
+}
+
+TEST_F(FilterTest, FloatSumRejectsOverflow) {
+    const auto positive = parse("value\n1e308\n1e308\n").aggregate("value", AggregateFn::Sum);
+    EXPECT_THROW(positive.execute(), std::overflow_error);
+    const auto negative = parse("value\n-1e308\n-1e308\n").aggregate("value", AggregateFn::Sum);
+    EXPECT_THROW(negative.execute(), std::overflow_error);
+}
+
+TEST_F(FilterTest, AverageReturnsFractionsForIntegerInput) {
+    const auto average = frame.aggregate("id", AggregateFn::Avg).execute();
+    EXPECT_EQ(std::get<DataFrame::FloatColumn>(average.column(0)), (DataFrame::FloatColumn{1.5}));
+    const auto nullable = parse("value\n\n-3\n\n2\n").aggregate("value", AggregateFn::Avg).execute();
+    EXPECT_DOUBLE_EQ(std::get<DataFrame::FloatColumn>(nullable.column(0))[0].value(), -0.5);
+}
+
+TEST_F(FilterTest, AverageAvoidsOverflowWhenTheMeanIsRepresentable) {
+    const auto large_floats = parse("value\n1e308\n1e308\n").aggregate("value", AggregateFn::Avg).execute();
+    EXPECT_DOUBLE_EQ(std::get<DataFrame::FloatColumn>(large_floats.column(0))[0].value(), 1e308);
+    const auto opposite_signs = parse("value\n-1e308\n1e308\n").aggregate("value", AggregateFn::Avg).execute();
+    EXPECT_DOUBLE_EQ(std::get<DataFrame::FloatColumn>(opposite_signs.column(0))[0].value(), 0.0);
+    const auto large_integers = parse("value\n9223372036854775807\n9223372036854775807\n")
+        .aggregate("value", AggregateFn::Avg).execute();
+    const double expected = static_cast<double>(std::numeric_limits<std::int64_t>::max());
+    EXPECT_DOUBLE_EQ(std::get<DataFrame::FloatColumn>(large_integers.column(0))[0].value(), expected);
+}
 
 } // namespace

@@ -47,6 +47,7 @@ public:
     // An empty output_name defaults to <function>_<column>, e.g. avg_points.
     // Count returns the number of non-null values as int64.
     // Min/Max preserve the input type and return null for empty/all-null input.
+    // Sum/Avg require numeric input. Sum preserves its type (empty -> 0); Avg returns double (empty -> null).
     DataFrame aggregate(const std::string& column, AggregateFn function,
                         const std::string& output_name = "") const;
     DataFrame limit(std::size_t count) const;

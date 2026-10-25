@@ -44,7 +44,10 @@ public:
     // PUBLIC INTERFACE (DO NOT CHANGE SIGNATURE)
     DataFrame filter(const Predicate& predicate) const;
     DataFrame select(const std::vector<std::string>& columns) const;
-    DataFrame aggregate(const std::string& column, AggregateFn function) const;
+    // An empty output_name defaults to <function>_<column>, e.g. avg_points.
+    // Count returns the number of non-null values as int64.
+    DataFrame aggregate(const std::string& column, AggregateFn function,
+                        const std::string& output_name = "") const;
     DataFrame limit(std::size_t count) const;
     DataFrame execute() const;
 
@@ -53,11 +56,8 @@ public:
     using FloatColumn = std::vector<std::optional<double>>;
     using Column = std::variant<StringColumn, IntColumn, FloatColumn>;
 
-    const std::vector<std::string>& column_names() const { return selected_columns_; }
-    const Column& column(std::size_t index) const {
-        const auto storage_index = get_column_index(selected_columns_.at(index));
-        return data_->columns.at(storage_index);
-    }
+    std::vector<std::string> column_names() const;
+    const Column& column(std::size_t index) const;
     std::size_t row_count() const { return data_->rows; }
 private:
     struct SelectQuery {
@@ -72,7 +72,21 @@ private:
         std::size_t count;
     };
 
-    using Query = std::variant<SelectQuery, FilterQuery, LimitQuery>;
+    struct AggregateQuery {
+        std::string column;
+        AggregateFn function;
+        std::string output_name;
+    };
+
+    using Query = std::variant<SelectQuery, FilterQuery, LimitQuery, AggregateQuery>;
+
+    struct ColumnInfo {
+        enum class Type { String, Int64, Float64 };
+        std::string name;
+        Type type;
+        // Generated aggregate values have no backing column until execution.
+        std::optional<std::size_t> storage_index;
+    };
 
     struct Storage {
         std::vector<std::string> names;
@@ -83,12 +97,14 @@ private:
     std::shared_ptr<const Storage> execute_query(const SelectQuery& query) const;
     std::shared_ptr<const Storage> execute_query(const FilterQuery& query) const;
     std::shared_ptr<const Storage> execute_query(const LimitQuery& query) const;
+    std::shared_ptr<const Storage> execute_query(const AggregateQuery& query) const;
     std::shared_ptr<Storage> create_storage(const std::vector<std::string>& columns) const;
     void validate_predicate(const Predicate& predicate) const;
     std::size_t get_column_index(const std::string& column) const;
+    void reset_selected_columns();
 
     std::shared_ptr<const Storage> data_ = std::make_shared<const Storage>();
-    std::vector<std::string> selected_columns_;
+    std::vector<ColumnInfo> selected_column_info_;
     std::vector<Query> queries_;
     friend DataFrame read_csv(const std::string& file);
 };

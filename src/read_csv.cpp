@@ -164,7 +164,7 @@ DataFrame read_csv(const std::string& file) {
     }
 
     DataFrame result;
-    result.selected_columns_ = data->names;
     result.data_ = std::move(data);
+    result.reset_selected_columns();
     return result;
 }

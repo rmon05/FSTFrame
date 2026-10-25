@@ -407,4 +407,109 @@ TEST_F(LimitTest, PreservesSelectionsAndIndependentPlans) {
     EXPECT_EQ(pending.limit(0).limit(2).execute().row_count(), 0);
 }
 
+class CountTest : public FilterTest {};
+
+TEST_F(CountTest, CountsNonNullValuesForEveryColumnType) {
+    for (const auto& column : {"id", "name", "score"}) {
+        const auto counted = frame.aggregate(column, AggregateFn::Count).execute();
+        EXPECT_EQ(counted.column_names(), (std::vector<std::string>{std::string{"count_"} + column}));
+        EXPECT_EQ(counted.row_count(), 1);
+        const std::int64_t expected = std::string{column} == "score" ? 1 : 2;
+        EXPECT_EQ(std::get<DataFrame::IntColumn>(counted.column(0)), (DataFrame::IntColumn{expected}));
+    }
+}
+
+TEST_F(CountTest, QueuesAggregationAndLeavesOriginalUntouched) {
+    const auto* original_column = &frame.column(0);
+    const auto pending = frame.aggregate("id", AggregateFn::Count);
+    EXPECT_EQ(pending.column_names(), (std::vector<std::string>{"count_id"}));
+    EXPECT_EQ(pending.row_count(), 2); // Backing rows are unchanged until execution.
+    EXPECT_THROW(pending.column(0), std::logic_error);
+
+    const auto first = pending.execute();
+    const auto second = pending.execute();
+    EXPECT_EQ(first.column(0), second.column(0));
+    EXPECT_NE(&first.column(0), &second.column(0));
+    EXPECT_EQ(&first.execute().column(0), &first.column(0));
+    EXPECT_EQ(&frame.column(0), original_column);
+    EXPECT_EQ(frame.column_names(), (std::vector<std::string>{"id", "name", "score"}));
+    EXPECT_EQ(frame.row_count(), 2);
+}
+
+TEST_F(CountTest, SupportsCustomNamesIncludingExistingInputNames) {
+    const auto named = frame.aggregate("score", AggregateFn::Count, "available_scores").execute();
+    EXPECT_EQ(named.column_names(), (std::vector<std::string>{"available_scores"}));
+    EXPECT_EQ(std::get<DataFrame::IntColumn>(named.column(0)), (DataFrame::IntColumn{1}));
+
+    const auto reused_name = frame.aggregate("name", AggregateFn::Count, "name");
+    EXPECT_NO_THROW(reused_name.filter({"name", CompareOp::Equal, std::int64_t{2}}));
+    EXPECT_THROW(reused_name.filter({"name", CompareOp::Equal, std::string{"Alice"}}), std::invalid_argument);
+    EXPECT_THROW(reused_name.column(0), std::logic_error);
+    EXPECT_EQ(reused_name.filter({"name", CompareOp::Equal, 2.0}).execute().row_count(), 1);
+    EXPECT_EQ(frame.aggregate("id", AggregateFn::Count, "").column_names(),
+              (std::vector<std::string>{"count_id"}));
+}
+
+TEST_F(CountTest, EmptyAndAllNullColumnsProduceOneRowContainingZero) {
+    const auto empty = frame.limit(0).aggregate("id", AggregateFn::Count).execute();
+    EXPECT_EQ(empty.row_count(), 1);
+    EXPECT_EQ(std::get<DataFrame::IntColumn>(empty.column(0)), (DataFrame::IntColumn{0}));
+    const auto nulls = parse("value\n\n\n").aggregate("value", AggregateFn::Count).execute();
+    EXPECT_EQ(nulls.row_count(), 1);
+    EXPECT_EQ(std::get<DataFrame::IntColumn>(nulls.column(0)), (DataFrame::IntColumn{0}));
+    const auto header_only = parse("value\n").aggregate("value", AggregateFn::Count).execute();
+    EXPECT_EQ(std::get<DataFrame::IntColumn>(header_only.column(0)), (DataFrame::IntColumn{0}));
+}
+
+TEST_F(CountTest, RejectsUnavailableColumnsAndUnsupportedFunctionsImmediately) {
+    EXPECT_THROW(frame.aggregate("missing", AggregateFn::Count), std::invalid_argument);
+    EXPECT_THROW(frame.select({"id"}).aggregate("score", AggregateFn::Count), std::invalid_argument);
+    EXPECT_THROW(frame.select({}).aggregate("id", AggregateFn::Count), std::invalid_argument);
+    for (const auto function : {AggregateFn::Sum, AggregateFn::Min, AggregateFn::Max,
+                                AggregateFn::Avg, static_cast<AggregateFn>(999)}) {
+        EXPECT_THROW(frame.aggregate("id", function), std::invalid_argument);
+    }
+}
+
+TEST_F(CountTest, ComposesWithFiltersSelectionsAndLimitsInOrder) {
+    const auto counted = frame.select({"score", "id"})
+        .filter({"id", CompareOp::Equal, std::int64_t{2}})
+        .limit(1).aggregate("score", AggregateFn::Count).execute();
+    EXPECT_EQ(std::get<DataFrame::IntColumn>(counted.column(0)), (DataFrame::IntColumn{0}));
+
+    const auto limited_count = frame.limit(1).aggregate("id", AggregateFn::Count).execute();
+    EXPECT_EQ(std::get<DataFrame::IntColumn>(limited_count.column(0)), (DataFrame::IntColumn{1}));
+    const auto count_then_limit = frame.aggregate("id", AggregateFn::Count).limit(0).execute();
+    EXPECT_EQ(count_then_limit.row_count(), 0);
+    EXPECT_TRUE(std::get<DataFrame::IntColumn>(count_then_limit.column(0)).empty());
+}
+
+TEST_F(CountTest, ValidatesAndExecutesQueriesAgainstPendingAggregateResult) {
+    const auto pending = frame.aggregate("id", AggregateFn::Count, "total");
+    EXPECT_THROW(pending.select({"id"}), std::invalid_argument);
+    EXPECT_THROW(pending.filter({"total", CompareOp::Equal, std::string{"2"}}), std::invalid_argument);
+    const auto selected = pending.select({"total"});
+    EXPECT_THROW(selected.column(0), std::logic_error);
+    EXPECT_EQ(selected.filter({"total", CompareOp::Greater, 1.0}).execute().row_count(), 1);
+    EXPECT_EQ(selected.filter({"total", CompareOp::Greater, std::int64_t{2}}).execute().row_count(), 0);
+
+    const auto counted_again = pending.aggregate("total", AggregateFn::Count).execute();
+    EXPECT_EQ(counted_again.column_names(), (std::vector<std::string>{"count_total"}));
+    EXPECT_EQ(std::get<DataFrame::IntColumn>(counted_again.column(0)), (DataFrame::IntColumn{1}));
+    EXPECT_EQ(pending.execute().column_names(), (std::vector<std::string>{"total"}));
+}
+
+TEST_F(CountTest, BranchesAndArgumentCopiesStayIndependent) {
+    std::string input = "id";
+    std::string output = "total";
+    const auto first = frame.aggregate(input, AggregateFn::Count, output);
+    input = "score";
+    output = "other";
+    const auto second = frame.aggregate(input, AggregateFn::Count, output);
+    EXPECT_EQ(first.execute().column_names(), (std::vector<std::string>{"total"}));
+    EXPECT_EQ(std::get<DataFrame::IntColumn>(first.execute().column(0)), (DataFrame::IntColumn{2}));
+    EXPECT_EQ(second.execute().column_names(), (std::vector<std::string>{"other"}));
+    EXPECT_EQ(std::get<DataFrame::IntColumn>(second.execute().column(0)), (DataFrame::IntColumn{1}));
+}
+
 } // namespace

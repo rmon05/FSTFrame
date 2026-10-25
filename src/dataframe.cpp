@@ -96,15 +96,31 @@ DataFrame DataFrame::filter(const Predicate& predicate) const {
 
 DataFrame DataFrame::select(const std::vector<std::string>& columns) const {
     std::unordered_set<std::string> names;
+    std::vector<ColumnInfo> column_info;
+    column_info.reserve(columns.size());
     for (const auto& name : columns) {
-        get_column_index(name);
+        const auto index = get_column_index(name);
         if (!names.insert(name).second) {
             throw std::invalid_argument("Duplicate selected column: " + name);
         }
+        column_info.push_back(selected_column_info_[index]);
     }
     DataFrame result = *this;
-    result.selected_columns_ = columns;
+    result.selected_column_info_ = std::move(column_info);
     result.queries_.push_back(SelectQuery{columns});
+    return result;
+}
+
+DataFrame DataFrame::aggregate(const std::string& column, AggregateFn function,
+                               const std::string& output_name) const {
+    get_column_index(column);
+    if (function != AggregateFn::Count) {
+        throw std::invalid_argument("Only Count aggregation is implemented");
+    }
+    const std::string name = output_name.empty() ? "count_" + column : output_name;
+    DataFrame result = *this;
+    result.selected_column_info_ = {{name, ColumnInfo::Type::Int64, std::nullopt}};
+    result.queries_.push_back(AggregateQuery{column, function, name});
     return result;
 }
 
@@ -117,13 +133,13 @@ DataFrame DataFrame::limit(std::size_t count) const {
 DataFrame DataFrame::execute() const {
     DataFrame result = *this;
     result.queries_.clear();
-    result.selected_columns_ = result.data_->names;
+    result.reset_selected_columns();
 
     for (const auto& query : queries_) {
         result.data_ = std::visit([&](const auto& operation) {
             return result.execute_query(operation);
         }, query);
-        result.selected_columns_ = result.data_->names;
+        result.reset_selected_columns();
     }
 
     return result;
@@ -142,7 +158,7 @@ std::shared_ptr<const DataFrame::Storage> DataFrame::execute_query(const SelectQ
 }
 
 std::shared_ptr<const DataFrame::Storage> DataFrame::execute_query(const FilterQuery& query) const {
-    auto output_storage = create_storage(selected_columns_);
+    auto output_storage = create_storage(column_names());
     auto& output = *output_storage;
 
     const auto& predicate = query.predicate;
@@ -172,7 +188,7 @@ std::shared_ptr<const DataFrame::Storage> DataFrame::execute_query(const FilterQ
 }
 
 std::shared_ptr<const DataFrame::Storage> DataFrame::execute_query(const LimitQuery& query) const {
-    auto output_storage = create_storage(selected_columns_);
+    auto output_storage = create_storage(column_names());
     auto& output = *output_storage;
     output.rows = std::min(query.count, data_->rows);
 
@@ -203,13 +219,28 @@ std::shared_ptr<DataFrame::Storage> DataFrame::create_storage(
     return storage;
 }
 
+std::shared_ptr<const DataFrame::Storage> DataFrame::execute_query(const AggregateQuery& query) const {
+    const auto index = get_column_index(query.column);
+    const auto count = std::visit([](const auto& column) {
+        return std::count_if(column.begin(), column.end(), [](const auto& cell) {
+            return cell.has_value();
+        });
+    }, data_->columns[index]);
+
+    auto output = std::make_shared<Storage>();
+    output->names = {query.output_name};
+    output->rows = 1;
+    output->columns.push_back(IntColumn{static_cast<std::int64_t>(count)});
+    return output;
+}
+
 void DataFrame::validate_predicate(const Predicate& predicate) const {
     const bool has_valid_operator = is_valid_comparison_operator(predicate.op);
     if (!has_valid_operator) {
         throw std::invalid_argument("Unknown comparison operator");
     }
     const auto index = get_column_index(predicate.column);
-    const bool column_is_string = std::holds_alternative<StringColumn>(data_->columns[index]);
+    const bool column_is_string = selected_column_info_[index].type == ColumnInfo::Type::String;
     const bool predicate_is_string = std::holds_alternative<std::string>(predicate.value);
     const bool types_are_compatible = column_is_string == predicate_is_string;
     if (!types_are_compatible) {
@@ -218,10 +249,39 @@ void DataFrame::validate_predicate(const Predicate& predicate) const {
 }
 
 std::size_t DataFrame::get_column_index(const std::string& column) const {
-    const auto selected = std::find(selected_columns_.begin(), selected_columns_.end(), column);
-    if (selected == selected_columns_.end()) {
+    const auto selected = std::find_if(selected_column_info_.begin(), selected_column_info_.end(),
+        [&](const ColumnInfo& info) { return info.name == column; });
+    if (selected == selected_column_info_.end()) {
         throw std::invalid_argument("Unknown column: " + column);
     }
-    const auto stored = std::find(data_->names.begin(), data_->names.end(), column);
-    return static_cast<std::size_t>(stored - data_->names.begin());
+    return static_cast<std::size_t>(selected - selected_column_info_.begin());
+}
+
+std::vector<std::string> DataFrame::column_names() const {
+    std::vector<std::string> names;
+    names.reserve(selected_column_info_.size());
+    for (const auto& info : selected_column_info_) {
+        names.push_back(info.name);
+    }
+    return names;
+}
+
+const DataFrame::Column& DataFrame::column(std::size_t index) const {
+    const auto& info = selected_column_info_.at(index);
+    if (!info.storage_index) {
+        throw std::logic_error("Aggregate values are not materialized; call execute() first");
+    }
+    return data_->columns.at(*info.storage_index);
+}
+
+void DataFrame::reset_selected_columns() {
+    selected_column_info_.clear();
+    selected_column_info_.reserve(data_->columns.size());
+    for (std::size_t index = 0; index < data_->columns.size(); ++index) {
+        const auto& column = data_->columns[index];
+        const auto type = std::holds_alternative<StringColumn>(column) ? ColumnInfo::Type::String
+            : std::holds_alternative<IntColumn>(column) ? ColumnInfo::Type::Int64
+            : ColumnInfo::Type::Float64;
+        selected_column_info_.push_back(ColumnInfo{data_->names[index], type, index});
+    }
 }

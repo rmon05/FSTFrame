@@ -139,6 +139,35 @@ template <typename Cell>
 DataFrame::Column aggregate_average(const std::vector<std::optional<Cell>>& column) {
     if constexpr (std::is_same_v<Cell, std::string>) {
         throw std::invalid_argument("Avg requires a numeric column");
+    } else if constexpr (std::is_same_v<Cell, std::int64_t>) {
+        const auto count = std::count_if(column.begin(), column.end(), [](const auto& cell) {
+            return cell.has_value();
+        });
+        if (count == 0) return DataFrame::FloatColumn{std::nullopt};
+
+        const auto divisor = static_cast<std::int64_t>(count);
+        std::int64_t whole = 0;
+        std::int64_t remainder = 0;
+        for (const auto& cell : column) {
+            if (!cell) continue;
+            // Divide before adding: the quotient sum fits even when the raw sum would overflow.
+            whole += *cell / divisor;
+            const auto cell_remainder = *cell % divisor;
+            // Carry full divisors into whole without overflowing the remainder sum.
+            if (cell_remainder > 0 && remainder >= divisor - cell_remainder) {
+                ++whole;
+                remainder -= divisor - cell_remainder;
+            } else if (cell_remainder < 0 && remainder <= -divisor - cell_remainder) {
+                --whole;
+                remainder += divisor + cell_remainder;
+            } else {
+                remainder += cell_remainder;
+            }
+        }
+        // Keep integer cancellation exact until the final conversion to the floating result.
+        const double average = static_cast<double>(whole)
+            + static_cast<double>(remainder) / static_cast<double>(divisor);
+        return DataFrame::FloatColumn{average};
     } else {
         std::optional<double> average;
         std::size_t count = 0;

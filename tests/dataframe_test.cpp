@@ -709,6 +709,22 @@ TEST_F(FilterTest, AverageReturnsFractionsForIntegerInput) {
     EXPECT_DOUBLE_EQ(std::get<DataFrame::FloatColumn>(nullable.column(0))[0].value(), -0.5);
 }
 
+TEST_F(FilterTest, IntegerAveragePreservesCancellationBeforeFloatingConversion) {
+    const auto boundaries = parse("value\n9223372036854775807\n-9223372036854775808\n")
+        .aggregate("value", AggregateFn::Avg).execute();
+    EXPECT_DOUBLE_EQ(std::get<DataFrame::FloatColumn>(boundaries.column(0))[0].value(), -0.5);
+    const auto near_double_precision = parse("value\n9007199254740993\n-9007199254740992\n")
+        .aggregate("value", AggregateFn::Avg).execute();
+    EXPECT_DOUBLE_EQ(std::get<DataFrame::FloatColumn>(near_double_precision.column(0))[0].value(), 0.5);
+    const auto exact_zero = parse("value\n-9223372036854775808\n9223372036854775807\n1\n")
+        .aggregate("value", AggregateFn::Avg).execute();
+    EXPECT_DOUBLE_EQ(std::get<DataFrame::FloatColumn>(exact_zero.column(0))[0].value(), 0.0);
+    const auto positive_carries = parse("value\n5\n5\n5\n").aggregate("value", AggregateFn::Avg).execute();
+    EXPECT_DOUBLE_EQ(std::get<DataFrame::FloatColumn>(positive_carries.column(0))[0].value(), 5.0);
+    const auto negative_carries = parse("value\n-5\n-5\n-5\n").aggregate("value", AggregateFn::Avg).execute();
+    EXPECT_DOUBLE_EQ(std::get<DataFrame::FloatColumn>(negative_carries.column(0))[0].value(), -5.0);
+}
+
 TEST_F(FilterTest, AverageAvoidsOverflowWhenTheMeanIsRepresentable) {
     const auto large_floats = parse("value\n1e308\n1e308\n").aggregate("value", AggregateFn::Avg).execute();
     EXPECT_DOUBLE_EQ(std::get<DataFrame::FloatColumn>(large_floats.column(0))[0].value(), 1e308);

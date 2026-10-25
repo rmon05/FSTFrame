@@ -68,7 +68,11 @@ private:
         Predicate predicate;
     };
 
-    using Query = std::variant<SelectQuery, FilterQuery>;
+    struct LimitQuery {
+        std::size_t count;
+    };
+
+    using Query = std::variant<SelectQuery, FilterQuery, LimitQuery>;
 
     struct Storage {
         std::vector<std::string> names;
@@ -78,6 +82,7 @@ private:
 
     std::shared_ptr<const Storage> execute_query(const SelectQuery& query) const;
     std::shared_ptr<const Storage> execute_query(const FilterQuery& query) const;
+    std::shared_ptr<const Storage> execute_query(const LimitQuery& query) const;
     std::shared_ptr<Storage> create_storage(const std::vector<std::string>& columns) const;
     void validate_predicate(const Predicate& predicate) const;
     std::size_t get_column_index(const std::string& column) const;

@@ -331,4 +331,80 @@ TEST_F(FilterTest, RejectsInvalidOperatorAtFilterCall) {
     EXPECT_THROW(frame.filter({"id", static_cast<CompareOp>(999), std::int64_t{1}}), std::invalid_argument);
 }
 
+class LimitTest : public SelectTest {};
+
+TEST_F(LimitTest, QueuesLimitAndOnlyCopiesDataAtExecution) {
+    const auto pending = frame.limit(1);
+    EXPECT_EQ(&pending.column(0), &frame.column(0));
+    EXPECT_EQ(pending.row_count(), 2);
+    EXPECT_EQ(pending.column_names(), frame.column_names());
+
+    const auto limited = pending.execute();
+    EXPECT_EQ(limited.row_count(), 1);
+    EXPECT_EQ(std::get<DataFrame::IntColumn>(limited.column(0)), (DataFrame::IntColumn{1}));
+    EXPECT_EQ(std::get<DataFrame::StringColumn>(limited.column(1)), (DataFrame::StringColumn{"Alice"}));
+    EXPECT_EQ(std::get<DataFrame::FloatColumn>(limited.column(2)), (DataFrame::FloatColumn{1.5}));
+    EXPECT_NE(&limited.column(0), &frame.column(0));
+    EXPECT_EQ(frame.row_count(), 2);
+    EXPECT_EQ(pending.row_count(), 2);
+    EXPECT_EQ(pending.execute().column(0), limited.column(0));
+    EXPECT_EQ(&limited.execute().column(0), &limited.column(0));
+}
+
+TEST_F(LimitTest, ZeroLimitPreservesSchemaAndTypes) {
+    const auto limited = frame.limit(0).execute();
+    EXPECT_EQ(limited.row_count(), 0);
+    EXPECT_EQ(limited.column_names(), frame.column_names());
+    EXPECT_TRUE(std::get<DataFrame::IntColumn>(limited.column(0)).empty());
+    EXPECT_TRUE(std::get<DataFrame::StringColumn>(limited.column(1)).empty());
+    EXPECT_TRUE(std::get<DataFrame::FloatColumn>(limited.column(2)).empty());
+}
+
+TEST_F(LimitTest, CountsAtOrAboveRowCountPreserveAllValuesAndNulls) {
+    for (const auto count : {std::size_t{2}, std::size_t{3}, std::numeric_limits<std::size_t>::max()}) {
+        const auto limited = frame.limit(count).execute();
+        EXPECT_EQ(limited.row_count(), frame.row_count());
+        for (std::size_t column = 0; column < frame.column_names().size(); ++column) {
+            EXPECT_EQ(limited.column(column), frame.column(column));
+            EXPECT_NE(&limited.column(column), &frame.column(column));
+        }
+    }
+}
+
+TEST_F(LimitTest, HandlesEmptyDataframesAndSelectionsWithNoColumns) {
+    EXPECT_EQ(DataFrame{}.limit(5).execute().row_count(), 0);
+    const auto empty = frame.filter({"id", CompareOp::Greater, std::int64_t{10}}).limit(1).execute();
+    EXPECT_EQ(empty.row_count(), 0);
+    EXPECT_EQ(empty.column_names(), frame.column_names());
+
+    const auto no_columns = frame.select({}).limit(1).execute();
+    EXPECT_EQ(no_columns.row_count(), 1);
+    EXPECT_TRUE(no_columns.column_names().empty());
+    EXPECT_EQ(frame.limit(1).select({}).execute().row_count(), 1);
+}
+
+TEST_F(LimitTest, ExecutesLimitAndFilterInTheirQueuedOrder) {
+    const Predicate second_row{"id", CompareOp::Greater, std::int64_t{1}};
+    const auto limit_first = frame.limit(1).filter(second_row).execute();
+    EXPECT_EQ(limit_first.row_count(), 0);
+    const auto filter_first = frame.filter(second_row).limit(1).execute();
+    EXPECT_EQ(std::get<DataFrame::IntColumn>(filter_first.column(0)), (DataFrame::IntColumn{2}));
+    EXPECT_EQ(std::get<DataFrame::FloatColumn>(filter_first.column(2)), (DataFrame::FloatColumn{std::nullopt}));
+}
+
+TEST_F(LimitTest, PreservesSelectionsAndIndependentPlans) {
+    const auto pending = frame.select({"score", "name"});
+    const auto one_row = pending.limit(1);
+    const auto zero_rows = pending.limit(0);
+    const auto limited = one_row.select({"name", "score"}).execute();
+    EXPECT_EQ(limited.column_names(), (std::vector<std::string>{"name", "score"}));
+    EXPECT_EQ(std::get<DataFrame::StringColumn>(limited.column(0)), (DataFrame::StringColumn{"Alice"}));
+    EXPECT_EQ(std::get<DataFrame::FloatColumn>(limited.column(1)), (DataFrame::FloatColumn{1.5}));
+    EXPECT_EQ(zero_rows.execute().row_count(), 0);
+    EXPECT_EQ(pending.execute().row_count(), 2);
+    EXPECT_EQ(pending.limit(1).limit(2).execute().row_count(), 1);
+    EXPECT_EQ(pending.limit(2).limit(1).execute().row_count(), 1);
+    EXPECT_EQ(pending.limit(0).limit(2).execute().row_count(), 0);
+}
+
 } // namespace

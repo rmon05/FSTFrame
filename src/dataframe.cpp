@@ -4,6 +4,7 @@
 #include <cmath>
 #include <compare>
 #include <limits>
+#include <iterator>
 #include <stdexcept>
 #include <type_traits>
 #include <unordered_set>
@@ -107,6 +108,12 @@ DataFrame DataFrame::select(const std::vector<std::string>& columns) const {
     return result;
 }
 
+DataFrame DataFrame::limit(std::size_t count) const {
+    DataFrame result = *this;
+    result.queries_.push_back(LimitQuery{count});
+    return result;
+}
+
 DataFrame DataFrame::execute() const {
     DataFrame result = *this;
     result.queries_.clear();
@@ -161,6 +168,22 @@ std::shared_ptr<const DataFrame::Storage> DataFrame::execute_query(const FilterQ
             ++output.rows;
         }
     }, data_->columns[index], predicate.value);
+    return output_storage;
+}
+
+std::shared_ptr<const DataFrame::Storage> DataFrame::execute_query(const LimitQuery& query) const {
+    auto output_storage = create_storage(selected_columns_);
+    auto& output = *output_storage;
+    output.rows = std::min(query.count, data_->rows);
+
+    for (std::size_t column = 0; column < data_->columns.size(); ++column) {
+        std::visit([&](const auto& values) {
+            using TypedColumn = std::decay_t<decltype(values)>;
+            auto& destination = std::get<TypedColumn>(output.columns[column]);
+            destination.reserve(output.rows);
+            std::copy_n(values.begin(), output.rows, std::back_inserter(destination));
+        }, data_->columns[column]);
+    }
     return output_storage;
 }
 

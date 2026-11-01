@@ -1,3 +1,4 @@
+# C++ project configs + core library
 cmake_minimum_required(VERSION 3.20)
 project(FSTFrame LANGUAGES CXX)
 
@@ -8,6 +9,26 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(fstframe src/dataframe.cpp src/read_csv.cpp)
 target_include_directories(fstframe PUBLIC src)
 
+# configure and build Python extension
+find_package(Python 3 REQUIRED COMPONENTS Interpreter Development.Module)
+include(FetchContent)
+FetchContent_Declare(
+    pybind11
+    GIT_REPOSITORY https://github.com/pybind/pybind11.git
+    GIT_TAG v3.0.2
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(pybind11)
+
+pybind11_add_module(_fstframe src/bindings.cpp)
+target_link_libraries(_fstframe PRIVATE fstframe)
+set_target_properties(_fstframe PROPERTIES
+    PREFIX ""
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/python/fstframe"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/python/fstframe"
+)
+
+# build and configure C++ unit tests
 include(CTest)
 if(BUILD_TESTING)
     include(FetchContent)

@@ -90,7 +90,7 @@ DataFrame::Column aggregate_count(const std::vector<std::optional<Cell>>& column
     const auto count = std::count_if(column.begin(), column.end(), [](const auto& cell) {
         return cell.has_value();
     });
-    return DataFrame::IntColumn{static_cast<std::int64_t>(count)};
+    return DataFrame::IntColumn{std::optional<std::int64_t>{static_cast<std::int64_t>(count)}};
 }
 
 template <typename Cell>
@@ -167,7 +167,7 @@ DataFrame::Column aggregate_average(const std::vector<std::optional<Cell>>& colu
         // Keep integer cancellation exact until the final conversion to the floating result.
         const double average = static_cast<double>(whole)
             + static_cast<double>(remainder) / static_cast<double>(divisor);
-        return DataFrame::FloatColumn{average};
+        return DataFrame::FloatColumn{std::optional<double>{average}};
     } else {
         std::optional<double> average;
         std::size_t count = 0;

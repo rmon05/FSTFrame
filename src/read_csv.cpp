@@ -3,6 +3,8 @@
 #include <fstream>
 #include <charconv>
 #include <cmath>
+#include <locale>
+#include <sstream>
 #include <stdexcept>
 #include <string_view>
 #include <type_traits>
@@ -11,6 +13,34 @@
 
 namespace {
 
+bool is_decimal_float(std::string_view text) {
+    std::size_t pos = 0;
+    if (pos < text.size() && text[pos] == '-') ++pos;
+
+    bool has_digit = false;
+    while (pos < text.size() && text[pos] >= '0' && text[pos] <= '9') {
+        has_digit = true;
+        ++pos;
+    }
+    if (pos < text.size() && text[pos] == '.') {
+        ++pos;
+        while (pos < text.size() && text[pos] >= '0' && text[pos] <= '9') {
+            has_digit = true;
+            ++pos;
+        }
+    }
+    if (!has_digit) return false;
+
+    if (pos < text.size() && (text[pos] == 'e' || text[pos] == 'E')) {
+        ++pos;
+        if (pos < text.size() && (text[pos] == '+' || text[pos] == '-')) ++pos;
+        const auto exponent_start = pos;
+        while (pos < text.size() && text[pos] >= '0' && text[pos] <= '9') ++pos;
+        if (pos == exponent_start) return false;
+    }
+    return pos == text.size();
+}
+
 template <typename T>
 bool parse_number(std::string_view text, T& value) {
     // from_chars accepts a leading minus, but a leading plus needs handling.
@@ -18,8 +48,16 @@ bool parse_number(std::string_view text, T& value) {
         text.remove_prefix(1);
         if (text.empty() || text.front() == '-') return false;
     }
-    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
-    if (error != std::errc{} || end != text.data() + text.size()) return false;
+    if constexpr (requires(T& parsed) { std::from_chars(text.data(), text.data() + text.size(), parsed); }) {
+        const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+        if (error != std::errc{} || end != text.data() + text.size()) return false;
+    } else {
+        if (!is_decimal_float(text)) return false;
+        std::istringstream input{std::string(text)};
+        input.imbue(std::locale::classic());
+        input >> std::noskipws >> value;
+        if (!input || input.peek() != std::char_traits<char>::eof()) return false;
+    }
     if constexpr (std::is_floating_point_v<T>) return std::isfinite(value);
     return true;
 }
